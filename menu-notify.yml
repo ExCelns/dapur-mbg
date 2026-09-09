@@ -1,0 +1,24 @@
+name: Notifikasi Menu MBG Harian
+
+on:
+  schedule:
+    # 23:00 UTC = 06:00 WIB (WIB = UTC+7)
+    - cron: '0 23 * * *'
+  workflow_dispatch: {} # supaya bisa dijalankan manual dari tab Actions untuk testing
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Kirim notifikasi menu
+        run: node notify-menu.js
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
