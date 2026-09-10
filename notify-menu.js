@@ -1,13 +1,15 @@
 // notify-menu.js
-// Cek menu.json secara berkala. Kalau menu hari ini sudah tersedia DAN belum pernah
-// dikirim hari ini, kirim notifikasi (teks + foto) ke Discord dan/atau WhatsApp, lalu
-// tandai "sudah terkirim" supaya tidak dobel di run berikutnya.
+// Cek menu.json secara berkala. Kalau menu hari ini sudah tersedia DAN (belum pernah
+// dikirim hari ini ATAU isinya berubah sejak pengiriman terakhir), kirim notifikasi
+// (teks + foto) ke Discord dan/atau WhatsApp, lalu simpan sidik jari (hash) menu yang
+// baru saja dikirim supaya bisa dibandingkan lagi di run berikutnya.
 //
 // Dijalankan otomatis via GitHub Actions tiap 30 menit (lihat .github/workflows/menu-notify.yml),
 // tapi hanya benar-benar aktif memproses di jam CHECK_START_HOUR_WIB–CHECK_END_HOUR_WIB.
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const MENU_URL = 'https://sppgsicarjosari.github.io/WebsiteMBG-SPPGSIC/menu.json';
 const STATE_FILE = path.join(__dirname, '.state', 'last-sent.json');
@@ -35,18 +37,26 @@ function getWIBParts() {
   return { date: `${map.year}-${map.month}-${map.day}`, hour };
 }
 
+// Sidik jari (hash) dari isi menu satu hari, dipakai untuk mendeteksi revisi.
+// Meng-hash seluruh objek entry, jadi perubahan apapun di dalamnya (isiOmpreng, gizi,
+// foto, penerimaManfaat, dll) akan terdeteksi, bukan cuma yang tampil di pesan.
+function hashEntry(entry) {
+  return crypto.createHash('sha256').update(JSON.stringify(entry)).digest('hex');
+}
+
 function readState() {
   try {
     const raw = fs.readFileSync(STATE_FILE, 'utf-8');
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return { date: parsed.date ?? null, hash: parsed.hash ?? null };
   } catch {
-    return { date: null };
+    return { date: null, hash: null };
   }
 }
 
-function writeState(date) {
+function writeState(date, hash) {
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-  fs.writeFileSync(STATE_FILE, JSON.stringify({ date }, null, 2) + '\n');
+  fs.writeFileSync(STATE_FILE, JSON.stringify({ date, hash }, null, 2) + '\n');
 }
 
 // menu.json menyimpan path foto secara relatif, mis. "image/menu-2026-09-09-kecil.jpeg".
@@ -84,10 +94,14 @@ function formatMessage(dapur, tanggal, entry) {
 
 // Payload Discord: teks di "content", foto porsi kecil & besar sebagai embed terpisah
 // (Discord webhook mendukung banyak embed sekaligus, masing-masing bisa punya 1 gambar).
-function buildDiscordPayload(dapur, tanggal, entry) {
-  const message = formatMessage(dapur, tanggal, entry);
-  const embeds = [];
+// isRevisi=true akan menambahkan penanda di awal pesan bahwa ini pengiriman ulang.
+function buildDiscordPayload(dapur, tanggal, entry, { isRevisi } = {}) {
+  let message = formatMessage(dapur, tanggal, entry);
+  if (isRevisi) {
+    message = `✏️ *MENU DIREVISI* — ada pembaruan dari sumber data.\n\n${message}`;
+  }
 
+  const embeds = [];
   const kecilFoto = resolveFotoUrl(entry.porsi?.kecil?.foto);
   const besarFoto = resolveFotoUrl(entry.porsi?.besar?.foto);
 
@@ -137,12 +151,8 @@ async function main() {
     return;
   }
 
-  const state = readState();
-  if (state.date === today) {
-    console.log(`Notifikasi untuk ${today} sudah pernah dikirim hari ini. Lewati.`);
-    return;
-  }
-
+  // Selalu ambil data terbaru dulu, karena kita butuh isinya untuk dibandingkan (hash),
+  // bukan cuma tanggalnya seperti sebelumnya.
   const res = await fetch(MENU_URL);
   if (!res.ok) throw new Error(`Gagal mengambil menu.json: ${res.status}`);
   const data = await res.json();
@@ -154,7 +164,21 @@ async function main() {
     return;
   }
 
-  const discordPayload = buildDiscordPayload(data.dapur, today, entry);
+  const currentHash = hashEntry(entry);
+  const state = readState();
+  const sudahDikirimHariIni = state.date === today;
+  const isiBerubah = sudahDikirimHariIni && state.hash !== currentHash;
+
+  if (sudahDikirimHariIni && !isiBerubah) {
+    console.log(`Menu untuk ${today} sudah terkirim dan belum ada perubahan. Lewati.`);
+    return;
+  }
+
+  if (isiBerubah) {
+    console.log(`⚠️ Menu untuk ${today} berubah sejak pengiriman terakhir (hash lama: ${state.hash?.slice(0, 8)}..., hash baru: ${currentHash.slice(0, 8)}...). Mengirim ulang sebagai revisi.`);
+  }
+
+  const discordPayload = buildDiscordPayload(data.dapur, today, entry, { isRevisi: isiBerubah });
   const fotoLinks = discordPayload.embeds.map(e => e.image.url);
 
   console.log('--- Pesan yang akan dikirim ---');
@@ -191,11 +215,11 @@ async function main() {
   const failed = results.filter(r => r.status === 'rejected');
   if (failed.length > 0) {
     failed.forEach(f => console.error(f.reason));
-    process.exit(1); // job ditandai gagal, dan TIDAK menandai "sudah terkirim" -> akan dicoba lagi di run berikutnya
+    process.exit(1); // job ditandai gagal, dan state TIDAK diperbarui -> akan dicoba lagi di run berikutnya
   }
 
-  writeState(today);
-  console.log(`Status ditandai: notifikasi untuk ${today} sudah terkirim.`);
+  writeState(today, currentHash);
+  console.log(`Status ditandai: menu untuk ${today} (hash ${currentHash.slice(0, 8)}...) sudah terkirim.`);
 }
 
 main().catch(err => {
