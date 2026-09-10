@@ -1,19 +1,14 @@
 name: Notifikasi Menu MBG Harian
 
 on:
-  # Jalan tiap 30 menit sepanjang hari. Script (notify-menu.js) yang menentukan
-  # jam aktif sebenarnya (CHECK_START_HOUR_WIB / CHECK_END_HOUR_WIB) dan mencegah
-  # notifikasi dobel lewat file .state/last-sent.json.
   schedule:
+    # Tiap 30 menit sepanjang hari. Script sendiri yang membatasi jam aktif proses
+    # lewat CHECK_START_HOUR_WIB / CHECK_END_HOUR_WIB di notify-menu.js.
     - cron: '*/30 * * * *'
   workflow_dispatch: {} # supaya bisa dijalankan manual dari tab Actions untuk testing
 
 permissions:
-  contents: write # diperlukan supaya workflow bisa commit file status "sudah terkirim"
-
-concurrency:
-  group: menu-notify
-  cancel-in-progress: false
+  contents: write # perlu supaya job ini boleh push balik file state ke repo
 
 jobs:
   notify:
@@ -25,21 +20,26 @@ jobs:
         with:
           node-version: 20
 
-      - name: Cek & kirim notifikasi menu
+      - name: Kirim notifikasi menu
         run: node notify-menu.js
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
 
-      - name: Simpan status "sudah terkirim" ke repo
+      # Runner GitHub Actions selalu mulai dari lingkungan kosong tiap run, jadi
+      # .state/last-sent.json yang ditulis notify-menu.js akan hilang lagi kalau
+      # tidak di-commit balik ke repo. Step ini yang menjaganya tetap ada di run berikutnya.
+      - name: Simpan state "sudah terkirim" balik ke repo
+        if: always()
         run: |
           if [ -n "$(git status --porcelain .state/last-sent.json 2>/dev/null)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add .state/last-sent.json
-            git commit -m "chore: tandai notifikasi menu sudah terkirim"
+            git add -f .state/last-sent.json
+            git commit -m "chore: update status notifikasi terkirim [skip ci]"
+            git pull --rebase
             git push
           else
-            echo "Tidak ada perubahan status untuk disimpan."
+            echo "Tidak ada perubahan state, lewati commit."
           fi
