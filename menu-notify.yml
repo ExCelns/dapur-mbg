@@ -1,10 +1,19 @@
 name: Notifikasi Menu MBG Harian
 
 on:
+  # Jalan tiap 30 menit sepanjang hari. Script (notify-menu.js) yang menentukan
+  # jam aktif sebenarnya (CHECK_START_HOUR_WIB / CHECK_END_HOUR_WIB) dan mencegah
+  # notifikasi dobel lewat file .state/last-sent.json.
   schedule:
-    # 23:00 UTC = 06:00 WIB (WIB = UTC+7)
-    - cron: '0 23 * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch: {} # supaya bisa dijalankan manual dari tab Actions untuk testing
+
+permissions:
+  contents: write # diperlukan supaya workflow bisa commit file status "sudah terkirim"
+
+concurrency:
+  group: menu-notify
+  cancel-in-progress: false
 
 jobs:
   notify:
@@ -16,9 +25,21 @@ jobs:
         with:
           node-version: 20
 
-      - name: Kirim notifikasi menu
+      - name: Cek & kirim notifikasi menu
         run: node notify-menu.js
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+
+      - name: Simpan status "sudah terkirim" ke repo
+        run: |
+          if [ -n "$(git status --porcelain .state/last-sent.json 2>/dev/null)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add .state/last-sent.json
+            git commit -m "chore: tandai notifikasi menu sudah terkirim"
+            git push
+          else
+            echo "Tidak ada perubahan status untuk disimpan."
+          fi
