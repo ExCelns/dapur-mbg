@@ -1,7 +1,7 @@
 // notify-menu.js
 // Cek menu.json secara berkala. Kalau menu hari ini sudah tersedia DAN belum pernah
-// dikirim hari ini, kirim notifikasi ke Discord dan/atau WhatsApp, lalu tandai
-// "sudah terkirim" supaya tidak dobel di run berikutnya.
+// dikirim hari ini, kirim notifikasi (teks + foto) ke Discord dan/atau WhatsApp, lalu
+// tandai "sudah terkirim" supaya tidak dobel di run berikutnya.
 //
 // Dijalankan otomatis via GitHub Actions tiap 30 menit (lihat .github/workflows/menu-notify.yml),
 // tapi hanya benar-benar aktif memproses di jam CHECK_START_HOUR_WIB–CHECK_END_HOUR_WIB.
@@ -49,6 +49,17 @@ function writeState(date) {
   fs.writeFileSync(STATE_FILE, JSON.stringify({ date }, null, 2) + '\n');
 }
 
+// menu.json menyimpan path foto secara relatif, mis. "image/menu-2026-09-09-kecil.jpeg".
+// Ubah jadi URL absolut, dihitung relatif terhadap lokasi menu.json itu sendiri.
+function resolveFotoUrl(pathFoto) {
+  if (!pathFoto) return null;
+  try {
+    return new URL(pathFoto, MENU_URL).href;
+  } catch {
+    return null;
+  }
+}
+
 function formatMessage(dapur, tanggal, entry) {
   const lines = [];
   lines.push(`🍱 *Menu MBG Hari Ini — ${entry.hari}, ${tanggal}*`);
@@ -71,22 +82,45 @@ function formatMessage(dapur, tanggal, entry) {
   return lines.join('\n');
 }
 
-async function sendDiscord(webhookUrl, message) {
+// Payload Discord: teks di "content", foto porsi kecil & besar sebagai embed terpisah
+// (Discord webhook mendukung banyak embed sekaligus, masing-masing bisa punya 1 gambar).
+function buildDiscordPayload(dapur, tanggal, entry) {
+  const message = formatMessage(dapur, tanggal, entry);
+  const embeds = [];
+
+  const kecilFoto = resolveFotoUrl(entry.porsi?.kecil?.foto);
+  const besarFoto = resolveFotoUrl(entry.porsi?.besar?.foto);
+
+  if (kecilFoto) {
+    embeds.push({ title: 'Foto — Porsi Kecil', image: { url: kecilFoto }, color: 0xff9800 });
+  }
+  if (besarFoto) {
+    embeds.push({ title: 'Foto — Porsi Besar', image: { url: besarFoto }, color: 0x4caf50 });
+  }
+
+  return { content: message, embeds };
+}
+
+async function sendDiscord(webhookUrl, payload) {
   const res = await fetch(webhookUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content: message }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) {
     throw new Error(`Discord webhook gagal: ${res.status} ${await res.text()}`);
   }
-  console.log('✅ Terkirim ke Discord.');
+  console.log('✅ Terkirim ke Discord (dengan foto).');
 }
 
 // Menggunakan CallMeBot (https://www.callmebot.com/blog/free-api-whatsapp-messages/)
 // Catatan: layanan gratis pihak ketiga, tidak resmi dari WhatsApp/Meta.
-async function sendWhatsApp(phone, apiKey, message) {
-  const url = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(message)}&apikey=${encodeURIComponent(apiKey)}`;
+// CallMeBot hanya mendukung teks polos, jadi link foto disisipkan di pesan.
+async function sendWhatsApp(phone, apiKey, message, fotoLinks) {
+  const fullMessage = fotoLinks.length
+    ? `${message}\n\n📷 Foto:\n${fotoLinks.join('\n')}`
+    : message;
+  const url = `https://api.callmebot.com/whatsapp.php?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(fullMessage)}&apikey=${encodeURIComponent(apiKey)}`;
   const res = await fetch(url);
   const body = await res.text();
   if (!res.ok) {
@@ -120,9 +154,12 @@ async function main() {
     return;
   }
 
-  const message = formatMessage(data.dapur, today, entry);
+  const discordPayload = buildDiscordPayload(data.dapur, today, entry);
+  const fotoLinks = discordPayload.embeds.map(e => e.image.url);
+
   console.log('--- Pesan yang akan dikirim ---');
-  console.log(message);
+  console.log(discordPayload.content);
+  if (fotoLinks.length) console.log('Foto:', fotoLinks.join(', '));
   console.log('-------------------------------');
 
   const {
@@ -134,13 +171,13 @@ async function main() {
   const tasks = [];
 
   if (DISCORD_WEBHOOK_URL) {
-    tasks.push(sendDiscord(DISCORD_WEBHOOK_URL, message));
+    tasks.push(sendDiscord(DISCORD_WEBHOOK_URL, discordPayload));
   } else {
     console.warn('⚠️ DISCORD_WEBHOOK_URL belum diset, lewati Discord.');
   }
 
   if (CALLMEBOT_PHONE && CALLMEBOT_APIKEY) {
-    tasks.push(sendWhatsApp(CALLMEBOT_PHONE, CALLMEBOT_APIKEY, message));
+    tasks.push(sendWhatsApp(CALLMEBOT_PHONE, CALLMEBOT_APIKEY, discordPayload.content, fotoLinks));
   } else {
     console.warn('⚠️ CALLMEBOT_PHONE / CALLMEBOT_APIKEY belum diset, lewati WhatsApp.');
   }
