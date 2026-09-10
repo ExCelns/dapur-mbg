@@ -66,6 +66,8 @@ function formatMessage(dapur, tanggal, entry) {
   if (energiKecil) lines.push(`⚡ Energi (porsi kecil): ${energiKecil}`);
   if (energiBesar) lines.push(`⚡ Energi (porsi besar): ${energiBesar}`);
 
+  lines.push(`@everyone`);
+
   return lines.join('\n');
 }
 
