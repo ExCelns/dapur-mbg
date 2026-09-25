@@ -70,6 +70,25 @@ function resolveFotoUrl(pathFoto) {
   }
 }
 
+// BARU — ini kemungkinan besar sumber masalahnya:
+// menu.json kadang sudah memuat entry hari ini (lengkap dengan field "foto") SEBELUM
+// file foto-nya benar-benar selesai di-upload ke GitHub Pages. Kalau notifikasi dikirim
+// saat itu juga, Discord akan gagal fetch gambarnya (404) waktu merender embed — dan
+// karena teks entry-nya sendiri tidak berubah lagi di run berikutnya, hash-based dedupe
+// di atas tidak akan pernah mendeteksi ini sebagai "perlu dikirim ulang". Makanya
+// gambarnya hilang terus meskipun sumbernya sendiri belakangan sudah punya fotonya.
+// Fix-nya: jangan kirim dulu kalau foto belum benar-benar bisa diakses (HEAD 200) —
+// cukup skip run ini, cron 30 menitan berikutnya akan coba lagi otomatis.
+async function isImageReachable(url) {
+  if (!url) return false;
+  try {
+    const res = await fetch(url, { method: 'HEAD' });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 function formatMessage(dapur, tanggal, entry) {
   const lines = [];
   lines.push(`🍱 *Menu MBG Hari Ini — ${entry.hari}, ${tanggal}*`);
@@ -95,16 +114,15 @@ function formatMessage(dapur, tanggal, entry) {
 // Payload Discord: teks di "content", foto porsi kecil & besar sebagai embed terpisah
 // (Discord webhook mendukung banyak embed sekaligus, masing-masing bisa punya 1 gambar).
 // isRevisi=true akan menambahkan penanda di awal pesan bahwa ini pengiriman ulang.
-function buildDiscordPayload(dapur, tanggal, entry, { isRevisi } = {}) {
+// kecilFoto/besarFoto sekarang diterima sebagai parameter (URL yang sudah di-resolve
+// dan sudah dipastikan reachable oleh main()), bukan dihitung ulang di sini.
+function buildDiscordPayload(dapur, tanggal, entry, { isRevisi, kecilFoto, besarFoto } = {}) {
   let message = formatMessage(dapur, tanggal, entry);
   if (isRevisi) {
     message = `✏️ *MENU DIREVISI* — ada pembaruan dari sumber data.\n\n${message}`;
   }
 
   const embeds = [];
-  const kecilFoto = resolveFotoUrl(entry.porsi?.kecil?.foto);
-  const besarFoto = resolveFotoUrl(entry.porsi?.besar?.foto);
-
   if (kecilFoto) {
     embeds.push({ title: 'Foto — Porsi Kecil', image: { url: kecilFoto }, color: 0xff9800 });
   }
@@ -178,7 +196,30 @@ async function main() {
     console.log(`⚠️ Menu untuk ${today} berubah sejak pengiriman terakhir (hash lama: ${state.hash?.slice(0, 8)}..., hash baru: ${currentHash.slice(0, 8)}...). Mengirim ulang sebagai revisi.`);
   }
 
-  const discordPayload = buildDiscordPayload(data.dapur, today, entry, { isRevisi: isiBerubah });
+  // BARU: pastikan foto-nya sudah benar-benar bisa diakses sebelum kirim. Kalau belum,
+  // perlakukan sama seperti "entry belum ada" — skip, dan biarkan run 30 menit
+  // berikutnya (masih di dalam jendela jam) coba lagi. State TIDAK ditulis di sini,
+  // jadi tidak akan dianggap "sudah terkirim".
+  const kecilFotoUrl = resolveFotoUrl(entry.porsi?.kecil?.foto);
+  const besarFotoUrl = resolveFotoUrl(entry.porsi?.besar?.foto);
+  const [kecilSiap, besarSiap] = await Promise.all([
+    isImageReachable(kecilFotoUrl),
+    isImageReachable(besarFotoUrl),
+  ]);
+  if (!kecilSiap || !besarSiap) {
+    console.log(
+      `Data menu ${today} sudah ada, tapi foto belum bisa diakses di sumbernya ` +
+      `(porsi kecil: ${kecilSiap ? 'OK' : 'belum'}, porsi besar: ${besarSiap ? 'OK' : 'belum'}). ` +
+      `Coba lagi di run berikutnya.`
+    );
+    return;
+  }
+
+  const discordPayload = buildDiscordPayload(data.dapur, today, entry, {
+    isRevisi: isiBerubah,
+    kecilFoto: kecilFotoUrl,
+    besarFoto: besarFotoUrl,
+  });
   const fotoLinks = discordPayload.embeds.map(e => e.image.url);
 
   console.log('--- Pesan yang akan dikirim ---');
